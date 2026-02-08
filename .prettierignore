@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+
+# Cache
+.cache/
+
+# Package manager files
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Generated files
+*.generated.*
+next-env.d.ts
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Coverage
+coverage/

@@ -1,0 +1,647 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  DECLARANT
+  VIEWER
+}
+
+enum DeclarationStatus {
+  DRAFT
+  IN_PROGRESS
+  PENDING_VALIDATION
+  VALIDATED
+  SUBMITTED
+  ACCEPTED
+  REJECTED
+  ARCHIVED
+}
+
+enum DeclarationType {
+  IMPORT
+  EXPORT
+  TRANSIT
+}
+
+enum DocumentType {
+  COMMERCIAL_INVOICE
+  PACKING_LIST
+  BILL_OF_LADING
+  AIR_WAYBILL
+  CMR
+  CERTIFICATE_OF_ORIGIN
+  CONTRACT
+  QUALITY_CERTIFICATE
+  LICENSE
+  PHYTOSANITARY_CERTIFICATE
+  VETERINARY_CERTIFICATE
+  OTHER
+}
+
+enum DocumentProcessingStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// ==========================================
+// USER & ORGANIZATION MODELS
+// ==========================================
+
+model User {
+  id             String       @id @default(cuid())
+  email          String       @unique
+  passwordHash   String
+  name           String
+  role           UserRole     @default(DECLARANT)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  
+  declarations   Declaration[]
+  documents      Document[]
+  auditLogs      AuditLog[]
+  aiSettings     UserAISettings?
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([email])
+  @@index([organizationId])
+}
+
+// User AI Settings
+model UserAISettings {
+  id                         String   @id @default(cuid())
+  userId                     String   @unique
+  user                       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Auto processing
+  autoProcessDocuments       Boolean  @default(false)
+  
+  // Confidence thresholds
+  minConfidenceForAutofill   Decimal  @default(0.7) @db.Decimal(3, 2) // 0.00 to 1.00
+  
+  // Allowed fields for autofill (JSON array of field names)
+  allowedAutofillFields      Json?    // e.g., ["exporterName", "consigneeName", ...]
+  
+  // Document language preference
+  documentLanguage           String   @default("ru") @db.VarChar(10) // ru, en, uz
+  
+  // Show AI suggestions
+  showAISuggestions          Boolean  @default(true)
+  
+  // Show confidence indicators
+  showConfidenceIndicators   Boolean  @default(true)
+  
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Organization {
+  id           String        @id @default(cuid())
+  name         String
+  inn          String        @unique @db.VarChar(9)
+  address      String?
+  
+  users        User[]
+  declarations Declaration[]
+  
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([inn])
+}
+
+// ==========================================
+// DECLARATION MODEL
+// ==========================================
+
+model Declaration {
+  id                    String            @id @default(cuid())
+  declarationNumber     String?           @unique
+  type                  DeclarationType   @default(IMPORT)
+  status                DeclarationStatus @default(DRAFT)
+  
+  // Связи
+  userId                String
+  user                  User              @relation(fields: [userId], references: [id])
+  organizationId        String?
+  organization          Organization?     @relation(fields: [organizationId], references: [id])
+  
+  // Блок 1: Тип декларации
+  declarationTypeCode   String?           @db.VarChar(10)
+  
+  // Блок 2: Экспортер/Отправитель
+  exporterName          String?
+  exporterAddress       String?
+  exporterInn           String?           @db.VarChar(9)
+  exporterCountryCode   String?           @db.VarChar(2)
+  exporterCountry       Country?          @relation("ExporterCountry", fields: [exporterCountryCode], references: [code])
+  
+  // Блок 3: Формы (количество добавочных листов)
+  additionalSheets      Int?              @default(0)
+  
+  // Блок 4: Отгрузочные спецификации (количество)
+  loadingSpecsCount     Int?
+  
+  // Блок 5: Всего наименований товаров
+  totalItems            Int?
+  
+  // Блок 6: Всего мест
+  totalPackages         Int?
+  
+  // Блок 7: Справочный номер
+  referenceNumber       String?
+  
+  // Блок 8: Получатель
+  consigneeName         String?
+  consigneeAddress      String?
+  consigneeInn          String?           @db.VarChar(9)
+  consigneeCountryCode  String?           @db.VarChar(2)
+  consigneeCountry      Country?          @relation("ConsigneeCountry", fields: [consigneeCountryCode], references: [code])
+  
+  // Блок 9: Лицо, ответственное за финансовое урегулирование
+  financialResponsible  String?
+  
+  // Блок 11: Торгующая страна
+  tradingCountryCode    String?           @db.VarChar(2)
+  tradingCountry        Country?          @relation("TradingCountry", fields: [tradingCountryCode], references: [code])
+  
+  // Блок 12: Общая таможенная стоимость
+  totalCustomsValue     Decimal?          @db.Decimal(18, 2)
+  
+  // Блок 13: Индикатор оффшора (1-оффшор, 2-не оффшор)
+  offshoreIndicator     String?           @db.VarChar(1) @default("2")
+  
+  // Блок 14: Декларант/Представитель
+  declarantName         String?
+  declarantInn          String?           @db.VarChar(9)
+  declarantAddress      String?
+  declarantStatus       String?           @db.VarChar(2) // Статус декларанта (1-владелец, 2-представитель)
+  
+  // Блок 15: Страна отправления
+  departureCountryCode  String?           @db.VarChar(2)
+  departureCountry      Country?          @relation("DepartureCountry", fields: [departureCountryCode], references: [code])
+  
+  // Блок 15a: Код страны отправления
+  departureCountryName  String?
+  
+  // Блок 16: Страна происхождения
+  originCountryCode     String?           @db.VarChar(2)
+  originCountry         Country?          @relation("OriginCountry", fields: [originCountryCode], references: [code])
+  
+  // Блок 17: Страна назначения
+  destinationCountryCode String?          @db.VarChar(2)
+  destinationCountry    Country?          @relation("DestinationCountry", fields: [destinationCountryCode], references: [code])
+  
+  // Блок 17a: Код региона назначения
+  destinationRegionCode String?           @db.VarChar(10)
+  
+  // Блок 18: Транспортное средство при отправлении
+  departureTransportMode     String?      @db.VarChar(2)
+  departureTransportNumber   String?
+  departureTransportCountry  String?      @db.VarChar(2)
+  
+  // Блок 19: Контейнер
+  containerIndicator    String?           @db.VarChar(1) // 0 или 1
+  containerNumbers      String[]          // Массив номеров контейнеров
+  
+  // Блок 20: Условия поставки (Инкотермс)
+  deliveryTermsCode     String?           @db.VarChar(3)
+  deliveryTermsPlace    String?
+  
+  // Блок 21: Транспортное средство на границе
+  borderTransportMode        String?      @db.VarChar(2)
+  borderTransportNumber      String?
+  borderTransportCountry     String?      @db.VarChar(2)
+  
+  // Блок 22: Валюта и общая сумма по счету
+  invoiceCurrencyCode   String?           @db.VarChar(3)
+  invoiceCurrency       Currency?         @relation(fields: [invoiceCurrencyCode], references: [code])
+  totalInvoiceAmount    Decimal?          @db.Decimal(18, 2)
+  
+  // Блок 23: Курс валюты
+  exchangeRate          Decimal?          @db.Decimal(12, 4)
+  
+  // Блок 24: Характер сделки
+  transactionNatureCode String?           @db.VarChar(3)
+  transactionCurrencyCode String?         @db.VarChar(3) // Условия оплаты (000, 100 и т.д.)
+  
+  // Блок 25: Вид транспорта на границе
+  borderTransportModeCode String?         @db.VarChar(2)
+  
+  // Блок 26: Вид транспорта внутри страны
+  inlandTransportModeCode String?         @db.VarChar(2)
+  
+  // Блок 27: Место погрузки/разгрузки
+  loadingPlace          String?
+  
+  // Блок 29: Орган въезда/выезда (таможня)
+  entryCustomsOffice    String?           @db.VarChar(8)
+  
+  // Блок 30: Местонахождение товаров
+  goodsLocation         String?
+  goodsLocationCode     String?           @db.VarChar(20)
+  
+  // Блоки 35, 38: Общие веса
+  totalGrossWeight      Decimal?          @db.Decimal(18, 3)
+  totalNetWeight        Decimal?          @db.Decimal(18, 3)
+  
+  // Блок 44: Дополнительная информация / Представленные документы
+  additionalInfo        String?           @db.Text
+  
+  // Блок 48: Отсрочка платежей
+  deferredPayment       String?           @db.VarChar(20)
+  
+  // Блок 49: Реквизиты склада
+  warehouseId           String?           @db.VarChar(20)
+  
+  // Блок 50: Принципал и уполномоченный представитель
+  principalName         String?
+  principalAddress      String?
+  authorizedRepName     String?
+  
+  // Блок 51: Предполагаемые таможенные органы транзита
+  transitCustomsOffices String[]
+  
+  // Блок 52: Гарантия
+  guaranteeType         String?           @db.VarChar(2)
+  guaranteeNumber       String?
+  guaranteeAmount       Decimal?          @db.Decimal(18, 2)
+  
+  // Блок 53: Орган назначения
+  destinationCustomsOffice String?        @db.VarChar(8)
+  
+  // Блок 54: Место и дата
+  declarationPlace      String?
+  declarationDate       DateTime?
+  
+  // Блок B: Подробности расчетов (итоговые суммы)
+  totalDutyAmount       Decimal?          @db.Decimal(18, 2)
+  totalVatAmount        Decimal?          @db.Decimal(18, 2)
+  totalExciseAmount     Decimal?          @db.Decimal(18, 2)
+  totalFeeAmount        Decimal?          @db.Decimal(18, 2)
+  totalPaymentAmount    Decimal?          @db.Decimal(18, 2)
+  
+  // Связи с другими моделями
+  items                 DeclarationItem[]
+  documents             Document[]
+  auditLogs             AuditLog[]
+  
+  // Метаданные
+  submittedAt           DateTime?
+  acceptedAt            DateTime?
+  rejectedAt            DateTime?
+  rejectionReason       String?
+  
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([userId])
+  @@index([organizationId])
+  @@index([status])
+  @@index([declarationNumber])
+  @@index([createdAt])
+}
+
+// ==========================================
+// DECLARATION ITEM MODEL (Товарная позиция)
+// ==========================================
+
+model DeclarationItem {
+  id                    String      @id @default(cuid())
+  declarationId         String
+  declaration           Declaration @relation(fields: [declarationId], references: [id], onDelete: Cascade)
+  
+  // Номер товара
+  itemNumber            Int
+  
+  // Блок 31: Грузовые места и описание товаров
+  goodsDescription      String?     @db.Text
+  marksAndNumbers       String?     // Маркировка и номера
+  packagingType         String?     @db.VarChar(10) // Код типа упаковки
+  packagingQuantity     Int?        // Количество грузовых мест
+  
+  // Блок 32: Товар №
+  itemIndex             Int?
+  
+  // Блок 33: Код товара (ТН ВЭД)
+  hsCode                String?     @db.VarChar(10)
+  hsCodeDescription     String?     // Описание кода ТН ВЭД
+  
+  // Блок 34: Код страны происхождения
+  originCountryCode     String?     @db.VarChar(2)
+  originCountry         Country?    @relation(fields: [originCountryCode], references: [code])
+  
+  // Блок 35: Вес брутто (кг)
+  grossWeight           Decimal?    @db.Decimal(18, 3)
+  
+  // Блок 36: Преференция
+  preferenceCode        String?     @db.VarChar(6)
+  
+  // Блок 37: Процедура
+  procedureCode         String?     @db.VarChar(4) // Заявляемая процедура
+  previousProcedureCode String?     @db.VarChar(4) // Предшествующая процедура
+  
+  // Блок 38: Вес нетто (кг)
+  netWeight             Decimal?    @db.Decimal(18, 3)
+  
+  // Блок 39: Квота
+  quotaNumber           String?     @db.VarChar(20)
+  
+  // Блок 40: Общая декларация / Предшествующий документ
+  previousDocumentType  String?     @db.VarChar(10)
+  previousDocumentNumber String?
+  
+  // Блок 41: Дополнительные единицы измерения
+  supplementaryUnit     String?     @db.VarChar(10) // Код единицы измерения
+  supplementaryQuantity Decimal?    @db.Decimal(18, 3) // Количество
+  
+  // Блок 42: Цена товара
+  itemPrice             Decimal?    @db.Decimal(18, 2)
+  itemCurrencyCode      String?     @db.VarChar(3)
+  
+  // Блок 43: Код метода оценки стоимости
+  valuationMethodCode   String?     @db.VarChar(2)
+  
+  // Блок 44: Дополнительная информация / Представленные документы
+  additionalInfo        String?     @db.Text
+  documentCodes         String[]    // Массив кодов документов
+  
+  // Блок 45: Таможенная стоимость
+  customsValue          Decimal?    @db.Decimal(18, 2)
+  
+  // Блок 46: Статистическая стоимость
+  statisticalValue      Decimal?    @db.Decimal(18, 2)
+  
+  // Блок 47: Исчисление платежей
+  dutyRate              Decimal?    @db.Decimal(8, 4)  // Ставка пошлины %
+  dutyAmount            Decimal?    @db.Decimal(18, 2) // Сумма пошлины
+  vatRate               Decimal?    @db.Decimal(8, 4)  // Ставка НДС %
+  vatAmount             Decimal?    @db.Decimal(18, 2) // Сумма НДС
+  exciseRate            Decimal?    @db.Decimal(8, 4)  // Ставка акциза
+  exciseAmount          Decimal?    @db.Decimal(18, 2) // Сумма акциза
+  feeAmount             Decimal?    @db.Decimal(18, 2) // Таможенный сбор
+  totalPayment          Decimal?    @db.Decimal(18, 2) // Итого платежей
+  
+  // Метаданные
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  @@unique([declarationId, itemNumber])
+  @@index([declarationId])
+  @@index([hsCode])
+}
+
+// ==========================================
+// DOCUMENT MODEL
+// ==========================================
+
+model Document {
+  id                    String                   @id @default(cuid())
+  declarationId         String?
+  declaration           Declaration?             @relation(fields: [declarationId], references: [id], onDelete: SetNull)
+  
+  // Кто загрузил
+  uploadedById          String
+  uploadedBy            User                     @relation(fields: [uploadedById], references: [id])
+  
+  // Информация о файле
+  fileName              String
+  fileType              String                   @db.VarChar(50) // MIME type
+  fileSize              Int                      // Размер в байтах
+  fileUrl               String                   // URL в хранилище (S3/Supabase)
+  
+  // Информация о документе
+  documentType          DocumentType             @default(OTHER)
+  documentNumber        String?
+  documentDate          DateTime?
+  
+  // AI обработка
+  extractedData         Json?                    // Данные извлеченные AI
+  processingStatus      DocumentProcessingStatus @default(PENDING)
+  processingError       String?                  // Ошибка при обработке
+  processedAt           DateTime?
+  
+  // AI processing logs
+  aiProcessingLogs      AIProcessingLog[]
+  
+  // Метаданные
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+
+  @@index([declarationId])
+  @@index([uploadedById])
+  @@index([documentType])
+  @@index([processingStatus])
+}
+
+// ==========================================
+// REFERENCE DATA MODELS (Справочники)
+// ==========================================
+
+model HSCode {
+  code                  String    @id @db.VarChar(10)
+  description           String    @db.Text
+  descriptionUz         String?   @db.Text // Описание на узбекском
+  unit                  String?   @db.VarChar(20)  // Основная единица измерения
+  supplementaryUnit     String?   @db.VarChar(20)  // Дополнительная единица
+  dutyRate              Decimal?  @db.Decimal(8, 4) // Ставка пошлины %
+  vatRate               Decimal?  @db.Decimal(8, 4) // Ставка НДС %
+  exciseRate            Decimal?  @db.Decimal(8, 4) // Ставка акциза
+  isActive              Boolean   @default(true)
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([description])
+  @@index([isActive])
+}
+
+model Country {
+  code                  String    @id @db.VarChar(2) // ISO 3166-1 alpha-2
+  nameEn                String    // English name
+  nameRu                String    // Russian name
+  nameUz                String?   // Uzbek name
+  isActive              Boolean   @default(true)
+  
+  // Обратные связи с декларациями
+  exporterDeclarations      Declaration[] @relation("ExporterCountry")
+  consigneeDeclarations     Declaration[] @relation("ConsigneeCountry")
+  tradingDeclarations       Declaration[] @relation("TradingCountry")
+  departureDeclarations     Declaration[] @relation("DepartureCountry")
+  originDeclarations        Declaration[] @relation("OriginCountry")
+  destinationDeclarations   Declaration[] @relation("DestinationCountry")
+  
+  // Обратные связи с товарными позициями
+  itemOrigins               DeclarationItem[]
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([nameRu])
+  @@index([isActive])
+}
+
+model Currency {
+  code                  String        @id @db.VarChar(3) // ISO 4217
+  name                  String
+  symbol                String?       @db.VarChar(5)
+  isActive              Boolean       @default(true)
+  
+  declarations          Declaration[]
+  exchangeRates         ExchangeRate[]
+  
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  @@index([isActive])
+}
+
+model ExchangeRate {
+  id                    String    @id @default(cuid())
+  currencyCode          String    @db.VarChar(3)
+  currency              Currency  @relation(fields: [currencyCode], references: [code])
+  rate                  Decimal   @db.Decimal(12, 4) // Курс к UZS
+  date                  DateTime  @db.Date // Дата курса
+  
+  createdAt             DateTime  @default(now())
+
+  @@unique([currencyCode, date])
+  @@index([currencyCode])
+  @@index([date])
+}
+
+model CustomsOffice {
+  code                  String    @id @db.VarChar(8)
+  name                  String
+  nameUz                String?
+  address               String?
+  regionCode            String?   @db.VarChar(10)
+  isActive              Boolean   @default(true)
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([regionCode])
+  @@index([isActive])
+}
+
+model TransportMode {
+  code                  String    @id @db.VarChar(2)
+  name                  String
+  nameUz                String?
+  isActive              Boolean   @default(true)
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+model UnitOfMeasure {
+  code                  String    @id @db.VarChar(10)
+  name                  String
+  nameUz                String?
+  symbol                String?   @db.VarChar(10)
+  isActive              Boolean   @default(true)
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+model DeliveryTerm {
+  code                  String    @id @db.VarChar(3) // EXW, FOB, CIF, etc.
+  name                  String
+  description           String?   @db.Text
+  isActive              Boolean   @default(true)
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+model CustomsProcedure {
+  code                  String    @id @db.VarChar(4)
+  name                  String
+  nameUz                String?
+  description           String?   @db.Text
+  isActive              Boolean   @default(true)
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+// ==========================================
+// AI PROCESSING LOG MODEL
+// ==========================================
+
+model AIProcessingLog {
+  id                    String      @id @default(cuid())
+  documentId            String
+  document              Document    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  // AI model info
+  modelUsed             String      @db.VarChar(100) // e.g., claude-sonnet-4-20250514
+  tokensUsed            Int?
+  processingTime        Int?        // in milliseconds
+  
+  // Extracted data
+  extractedData         Json?
+  confidence            Decimal?    @db.Decimal(4, 3) // 0.000 to 1.000
+  
+  // Request type
+  requestType           String      @default("DOCUMENT_ANALYSIS") @db.VarChar(50)
+  
+  // Error tracking
+  errorMessage          String?     @db.Text
+  
+  createdAt             DateTime    @default(now())
+
+  @@index([documentId])
+  @@index([createdAt])
+  @@index([modelUsed])
+}
+
+// ==========================================
+// AUDIT LOG MODEL
+// ==========================================
+
+model AuditLog {
+  id                    String      @id @default(cuid())
+  declarationId         String?
+  declaration           Declaration? @relation(fields: [declarationId], references: [id], onDelete: SetNull)
+  userId                String?
+  user                  User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  action                String      // CREATE, UPDATE, DELETE, STATUS_CHANGE, etc.
+  entityType            String      // Declaration, Document, etc.
+  entityId              String?
+  changes               Json?       // { field: { old: value, new: value } }
+  
+  ipAddress             String?     @db.VarChar(45)
+  userAgent             String?
+  
+  createdAt             DateTime    @default(now())
+
+  @@index([declarationId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
